@@ -20,21 +20,21 @@ jobs:
         include:
           - context: .
             file: Dockerfile
-            endpoint: ${{ github.repository }}
+            endpoint: tx3-lang/tx3-hydra
 
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v2.3.3
 
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@v1
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v2
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.file }}

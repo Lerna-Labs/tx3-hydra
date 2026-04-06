@@ -1,23 +1,17 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use base64::{Engine, prelude::BASE64_STANDARD};
 use jsonrpsee::types::{ErrorCode, ErrorObject, ErrorObjectOwned, Params};
 use serde::{Deserialize, Serialize};
-use tokio::sync::broadcast;
-use tracing::{debug, error, info};
+use tracing::{error, info};
 use tx3_cardano::pallas::ledger::traverse::MultiEraTx;
 
 use crate::{
-    hydra::{
-        self,
-        model::{HydraMessage, NewTx},
-    },
+    hydra::model::{HydraMessage, NewTx},
     trp::Context,
 };
 
 use super::Encoding;
-
-const SUBMIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Deserialize)]
 pub struct TrpSubmitTxRequest {
@@ -38,7 +32,6 @@ pub struct TrpSubmitResponse {
 pub async fn execute(
     params: Params<'_>,
     context: Arc<Context>,
-    hydra_channel: Arc<broadcast::Sender<hydra::model::Event>>,
 ) -> Result<serde_json::Value, ErrorObjectOwned> {
     tracing::info!(method = "trp.submit", "Received TRP request.");
 
@@ -105,69 +98,16 @@ pub async fn execute(
             )
         })?;
 
-    info!(?hash, "submitting tx");
     let hash = hex::encode(hash);
+    info!(?hash, "submitting tx");
+    let response = serde_json::to_value(TrpSubmitResponse { hash }).map_err(|error| {
+        error!(?error);
+        ErrorObject::owned(
+            ErrorCode::InternalError.code(),
+            "transaction accepted, but error to encode response",
+            Some(error.to_string()),
+        )
+    })?;
 
-    let mut rx = hydra_channel.subscribe();
-
-    let response =
-        serde_json::to_value(TrpSubmitResponse { hash: hash.clone() }).map_err(|error| {
-            error!(?error);
-            ErrorObject::owned(
-                ErrorCode::InternalError.code(),
-                "transaction accepted, but error to encode response",
-                Some(error.to_string()),
-            )
-        })?;
-
-    let result = tokio::time::timeout(SUBMIT_TIMEOUT, async {
-        loop {
-            match rx.recv().await {
-                Ok(event) => match event {
-                    hydra::model::Event::TxInvalid {
-                        transaction,
-                        validation_error,
-                    } => {
-                        if transaction.tx_id == hash {
-                            break Err(ErrorObject::owned(
-                                ErrorCode::InvalidRequest.code(),
-                                "invalid transaction",
-                                Some(validation_error.reason),
-                            ));
-                        }
-                    }
-                    hydra::model::Event::TxValid { tx_id } => {
-                        if tx_id == hash {
-                            break Ok(response);
-                        }
-                    }
-                    _ => {}
-                },
-                Err(error) => {
-                    debug!(
-                        ?error,
-                        "failed to subscribe event from internal trp hydra channel"
-                    );
-                    break Err(ErrorObject::owned(
-                        ErrorCode::InternalError.code(),
-                        "internal channel error",
-                        None::<String>,
-                    ));
-                }
-            }
-        }
-    })
-    .await;
-
-    match result {
-        Ok(inner) => inner,
-        Err(_) => {
-            debug!("submit request timeout");
-            Err(ErrorObject::owned(
-                ErrorCode::ServerIsBusy.code(),
-                "submit request timeout",
-                None::<String>,
-            ))
-        }
-    }
+    Ok(response)
 }
