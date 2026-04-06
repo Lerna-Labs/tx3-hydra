@@ -1,14 +1,13 @@
 use std::sync::Arc;
 
-use jsonrpsee::{RpcModule, server::Server, server::ServerConfig};
+use jsonrpsee::{RpcModule, server::Server};
 use serde::Deserialize;
-use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceBuilder;
 use tower_http::cors::CorsLayer;
 use tracing::info;
 
-use crate::hydra::{self, HydraAdapter};
+use crate::hydra::HydraAdapter;
 
 mod mapping;
 mod methods;
@@ -17,7 +16,6 @@ mod utxos;
 pub async fn run(
     config: Config,
     hydra_adapter: Arc<HydraAdapter>,
-    hydra_channel: Arc<broadcast::Sender<hydra::model::Event>>,
     cancellation_token: CancellationToken,
 ) -> anyhow::Result<()> {
     let cors_layer = if config.permissive_cors {
@@ -27,11 +25,7 @@ pub async fn run(
     };
 
     let middleware = ServiceBuilder::new().layer(cors_layer);
-    let server_config = ServerConfig::builder()
-        .max_connections(config.max_connections)
-        .build();
     let server = Server::builder()
-        .set_config(server_config)
         .set_http_middleware(middleware)
         .build(&config.listen_address)
         .await?;
@@ -44,10 +38,8 @@ pub async fn run(
     module.register_async_method("trp.resolve", |params, context, _| async {
         methods::resolve::execute(params, context).await
     })?;
-
-    module.register_async_method("trp.submit", move |params, context, _| {
-        let hydra_channel = Arc::clone(&hydra_channel);
-        async move { methods::submit::execute(params, context, hydra_channel).await }
+    module.register_async_method("trp.submit", |params, context, _| async {
+        methods::submit::execute(params, context).await
     })?;
 
     module.register_async_method("health", |_, context, _| async {
@@ -87,10 +79,6 @@ fn default_max_optimize_rounds() -> usize {
     10
 }
 
-fn default_max_connections() -> u32 {
-    100
-}
-
 #[derive(Deserialize, Clone)]
 pub struct Config {
     listen_address: String,
@@ -98,6 +86,4 @@ pub struct Config {
     permissive_cors: bool,
     #[serde(default = "default_max_optimize_rounds")]
     max_optimize_rounds: usize,
-    #[serde(default = "default_max_connections")]
-    max_connections: u32,
 }
