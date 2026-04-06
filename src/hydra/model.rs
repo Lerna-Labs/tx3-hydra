@@ -17,6 +17,22 @@ pub enum Event {
     },
     SnapshotConfirmed {
         snapshot: Snapshot,
+        seq: u64,
+        timestamp: String,
+    },
+    HeadIsOpen {
+        #[serde(alias = "utxo")]
+        snapshot: HashMap<TxID, Utxo>,
+    },
+    TxValid {
+        #[serde(alias = "transactionId")]
+        tx_id: String,
+    },
+    TxInvalid {
+        transaction: Transaction,
+
+        #[serde(alias = "validationError")]
+        validation_error: ValidationError,
     },
 }
 
@@ -52,6 +68,17 @@ impl From<HydraPParamsPlutusVersion> for u8 {
 }
 
 #[derive(Deserialize, Debug, Clone)]
+pub struct Transaction {
+    #[serde(alias = "txId")]
+    pub tx_id: String,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct ValidationError {
+    pub reason: String,
+}
+
+#[derive(Deserialize, Debug, Clone)]
 pub struct HydraPParams {
     #[serde(rename = "txFeePerByte")]
     pub tx_fee_per_byte: u64,
@@ -80,6 +107,7 @@ pub struct Utxo {
     pub datumhash: Option<String>,
 
     #[serde(rename = "inlineDatum")]
+    #[allow(dead_code)]
     pub inline_datum: Option<serde_json::Value>,
 
     /// Base16 encoding
@@ -132,7 +160,7 @@ impl Value {
         };
 
         match policy_value {
-            AssetValue::Lovelace(_) => return HashMap::new(),
+            AssetValue::Lovelace(_) => HashMap::new(),
             AssetValue::Multi(map) => map.clone(),
         }
     }

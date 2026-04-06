@@ -4,10 +4,10 @@ use futures_util::{
     stream::{SplitSink, SplitStream},
 };
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 use tokio::{
     net::TcpStream,
-    sync::{Mutex, RwLock, RwLockReadGuard},
+    sync::{Mutex, RwLock, RwLockReadGuard, broadcast},
 };
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
 use tokio_util::sync::CancellationToken;
@@ -22,21 +22,33 @@ pub struct UtxoSnapshot<'a>(pub RwLockReadGuard<'a, HashMap<TxID, Utxo>>);
 
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
+#[derive(Debug, Clone, Default)]
+pub struct Progress {
+    pub seq: u64,
+    pub timestamp: String,
+}
+
 pub struct HydraAdapter {
     config: Config,
+    progress: RwLock<Progress>,
     utxos: RwLock<HashMap<TxID, Utxo>>,
     head_status: RwLock<HeadStatus>,
     stream: Mutex<SplitStream<WsStream>>,
     sink: Mutex<SplitSink<WsStream, Message>>,
+    hydra_channel: Arc<broadcast::Sender<Event>>,
 }
 
 impl HydraAdapter {
-    pub async fn try_new(config: Config) -> anyhow::Result<Self> {
+    pub async fn try_new(
+        config: Config,
+        hydra_channel: Arc<broadcast::Sender<Event>>,
+    ) -> anyhow::Result<Self> {
         let (ws_stream, _) = connect_async(&config.ws_url).await?;
         info!("Hydra ws handshake has been successfully completed");
 
         let (write, read) = ws_stream.split();
 
+        let progress = RwLock::new(Progress::default());
         let utxos = RwLock::new(HashMap::new());
         let stream = Mutex::new(read);
         let sink = Mutex::new(write);
@@ -44,10 +56,12 @@ impl HydraAdapter {
 
         Ok(Self {
             config,
+            progress,
             utxos,
             stream,
             sink,
             head_status,
+            hydra_channel,
         })
     }
 
@@ -74,8 +88,25 @@ impl HydraAdapter {
                             self.update_utxos(snapshot).await;
                             *self.head_status.write().await = head_status;
                         }
-                        Event::SnapshotConfirmed { snapshot } => {
+                        Event::SnapshotConfirmed {
+                            snapshot,
+                            seq,
+                            timestamp,
+                        } => {
                             self.update_utxos(snapshot.utxo).await;
+                            self.update_progress(seq, timestamp).await;
+                        }
+                        Event::HeadIsOpen { snapshot } => {
+                            self.update_utxos(snapshot).await;
+                            *self.head_status.write().await = HeadStatus::Open;
+                        }
+                        Event::TxInvalid { .. } | Event::TxValid { .. } => {
+                            if let Err(error) = self.hydra_channel.send(event.clone()) {
+                                debug!(
+                                    ?error,
+                                    "failed to send event to internal trp hydra channel"
+                                );
+                            }
                         }
                     },
 
@@ -149,10 +180,18 @@ impl HydraAdapter {
         Ok(pparams)
     }
 
+    pub async fn get_progress(&self) -> Progress {
+        self.progress.read().await.clone()
+    }
+
     pub async fn update_utxos(&self, utxos: HashMap<TxID, Utxo>) {
         let utxos_len = utxos.len();
         *self.utxos.write().await = utxos;
         info!(utxos = utxos_len, "Snapshot updated");
+    }
+
+    pub async fn update_progress(&self, seq: u64, timestamp: String) {
+        *self.progress.write().await = Progress { seq, timestamp };
     }
 
     pub async fn read_utxos(&self) -> UtxoSnapshot {

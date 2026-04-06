@@ -2,51 +2,44 @@ use std::collections::HashMap;
 
 use anyhow::Context;
 use tx3_cardano::pallas::{
-    codec::utils::KeyValuePairs,
+    codec::{minicbor, utils::KeyValuePairs},
     ledger::{
         addresses::Address,
         primitives::{BigInt, Constr, PlutusData},
     },
 };
-use tx3_lang::{
-    CanonicalAssets, UtxoRef,
-    ir::{Expression, StructExpr},
-};
+use tx3_resolver::{CanonicalAssets, Expression, StructExpr, UtxoRef};
 
 use crate::hydra::{
     self,
     model::{AssetValue, Utxo},
 };
 
-fn map_policy_assets(policy: &str, assets: &HashMap<String, u64>) -> tx3_lang::CanonicalAssets {
-    let init = tx3_lang::CanonicalAssets::empty();
+fn map_policy_assets(policy: &str, assets: &HashMap<String, u64>) -> tx3_resolver::CanonicalAssets {
+    let init = tx3_resolver::CanonicalAssets::empty();
 
     let policy_id = hex::decode(policy).unwrap();
 
-    let all = assets
+    assets
         .iter()
         .map(|(asset_name, amount)| {
             let asset_name = hex::decode(asset_name).unwrap();
             CanonicalAssets::from_defined_asset(&policy_id, &asset_name, *amount as i128)
         })
-        .fold(init, |acc, x| acc + x);
-
-    all
+        .fold(init, |acc, x| acc + x)
 }
 
-fn map_assets(value: &hydra::model::Value) -> tx3_lang::CanonicalAssets {
-    let init = tx3_lang::CanonicalAssets::empty();
+fn map_assets(value: &hydra::model::Value) -> tx3_resolver::CanonicalAssets {
+    let init = tx3_resolver::CanonicalAssets::empty();
 
-    let out = value
+    value
         .assets
         .iter()
         .map(|(policy, assets)| match assets {
             AssetValue::Lovelace(amount) => CanonicalAssets::from_naked_amount(*amount as i128),
             AssetValue::Multi(assets) => map_policy_assets(policy, assets),
         })
-        .fold(init, |acc, x| acc + x);
-
-    out
+        .fold(init, |acc, x| acc + x)
 }
 
 fn map_big_int(x: &BigInt) -> Expression {
@@ -74,23 +67,23 @@ fn map_big_int(x: &BigInt) -> Expression {
 fn map_constr(x: &Constr<PlutusData>) -> Expression {
     Expression::Struct(StructExpr {
         constructor: x.constructor_value().unwrap_or_default() as usize,
-        fields: x.fields.iter().map(map_datum).collect(),
+        fields: x.fields.iter().map(map_plutus_data).collect(),
     })
 }
 
 fn map_array(x: &[PlutusData]) -> Expression {
-    Expression::List(x.iter().map(map_datum).collect())
+    Expression::List(x.iter().map(map_plutus_data).collect())
 }
 
 fn map_map(x: &KeyValuePairs<PlutusData, PlutusData>) -> Expression {
     Expression::List(
         x.iter()
-            .map(|(k, v)| Expression::List(vec![map_datum(k), map_datum(v)]))
+            .map(|(k, v)| Expression::List(vec![map_plutus_data(k), map_plutus_data(v)]))
             .collect(),
     )
 }
 
-fn map_datum(datum: &PlutusData) -> Expression {
+fn map_plutus_data(datum: &PlutusData) -> Expression {
     match datum {
         PlutusData::Constr(x) => map_constr(x),
         PlutusData::Map(x) => map_map(x),
@@ -100,42 +93,31 @@ fn map_datum(datum: &PlutusData) -> Expression {
     }
 }
 
-fn pick_utxo_datum(utxo: &Utxo) -> Result<Option<Expression>, anyhow::Error> {
-    if let Some(inline) = &utxo.inline_datum {
-        let plutus_data = serde_json::from_value::<PlutusData>(inline.clone())
-            .context("failed to decode hydra utxo inline datum")?;
+fn map_datum(utxo: &Utxo) -> Result<Option<Expression>, anyhow::Error> {
+    if let Some(datum) = &utxo.inline_datum_raw {
+        let datum = hex::decode(datum).context("failed to decode hydra utxo hex cbor datum raw")?;
 
-        return Ok(Some(map_datum(&plutus_data)));
+        let datum = minicbor::decode::<PlutusData>(&datum)?;
+
+        return Ok(Some(map_plutus_data(&datum)));
     }
 
-    if let Some(datum) = &utxo.datum {
-        let datum = hex::decode(datum).context("failed to decode hydra utxo hex datum")?;
-
-        let plutus_data = serde_json::from_slice::<PlutusData>(&datum)
-            .context("failed to decode hydra utxo datum")?;
-
-        return Ok(Some(map_datum(&plutus_data)));
-    }
-
-    if let Some(datum_raw) = &utxo.inline_datum_raw {
-        let datum =
-            hex::decode(datum_raw).context("failed to decode hydra utxo hex cbor datum raw")?;
-
-        return Ok(Some(Expression::Bytes(datum)));
+    if utxo.datum.is_some() {
+        return Err(anyhow::anyhow!("hash-only datums is not supported yet"));
     }
 
     Ok(None)
 }
 
-pub fn into_tx3_utxo(ref_: UtxoRef, utxo: &Utxo) -> anyhow::Result<tx3_lang::Utxo> {
+pub fn into_tx3_utxo(ref_: UtxoRef, utxo: &Utxo) -> anyhow::Result<tx3_resolver::Utxo> {
     let address =
         Address::from_bech32(&utxo.address).context("failed to decode hydra utxo address")?;
 
-    let datum = pick_utxo_datum(utxo)?;
+    let datum = map_datum(utxo)?;
 
     let assets = map_assets(&utxo.value);
 
-    let utxo = tx3_lang::Utxo {
+    let utxo = tx3_resolver::Utxo {
         address: address.to_vec(),
         r#ref: ref_,
         datum,
